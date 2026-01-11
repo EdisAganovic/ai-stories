@@ -142,4 +142,6 @@ Thumbs.db
 *.png
 *.bmp
 *.webp
+*.webp
 *.xyz
+config.json

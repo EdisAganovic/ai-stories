@@ -123,6 +123,12 @@
         <div class="container">
             <h1><i class="fas fa-book-open me-2"></i>Generator priča za djecu</h1>
             <p class="lead mb-0">Pretvorite dječiji crtež u fantastičnu priču.</p>
+            <p class="small text-white-50">by Edis Aganović (<a href="http://www.edu387.com" target="_blank"
+                    class="text-white-50 text-decoration-none">www.edu387.com</a>)</p>
+            <button class="btn btn-light btn-sm position-absolute top-0 end-0 m-3" data-bs-toggle="modal"
+                data-bs-target="#settingsModal">
+                <i class="fas fa-cog"></i> Postavke
+            </button>
         </div>
     </div>
 
@@ -251,6 +257,62 @@
         </div>
     </div>
 
+    <!-- Settings Modal -->
+    <div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="settingsModalLabel">Postavke</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="apiKey" class="form-label fw-bold">Gemini API Ključ (Obavezno)</label>
+                        <input type="password" class="form-control" id="apiKey"
+                            placeholder="Unesite vaš API ključ ovdje">
+                        <div class="form-text text-danger"><i class="fas fa-exclamation-circle"></i> Aplikacija
+                            zahtijeva vaš vlastiti API ključ za rad.</div>
+                        <div class="form-text">
+                            Logirajte se na AI studio da preuzmete vaš besplatni ključ:
+                            <a href="https://aistudio.google.com/api-keys"
+                                target="_blank">https://aistudio.google.com/api-keys</a>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="geminiModel" class="form-label fw-bold">Gemini Model</label>
+                        <input type="text" class="form-control" id="geminiModel" placeholder="npr. gemini-2.0-flash">
+                        <div class="form-text">Zadani model je <code>gemini-flash-latest</code>.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="tempRange" class="form-label fw-bold">Kreativnost (Temperature): <span
+                                id="tempValue">1.0</span></label>
+                        <input type="range" class="form-range" id="tempRange" min="0" max="2" step="0.1" value="1.0">
+                        <div class="form-text d-flex justify-content-between">
+                            <span>Predvidljivo (0)</span>
+                            <span>Kreativno (2)</span>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="customPrompt" class="form-label">Šablon Prompta</label>
+                        <textarea class="form-control" id="customPrompt" rows="10"></textarea>
+                        <div class="form-text">
+                            Koristite <code>{child_name}</code>, <code>{style}</code>, <code>{length}</code>, i
+                            <code>{image_description}</code> kao varijable.
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="loadDefaultPrompt">
+                        <i class="fas fa-undo me-1"></i> Učitaj zadani prompt
+                    </button>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Zatvori</button>
+                    <button type="button" class="btn btn-primary" id="saveSettings"
+                        data-bs-dismiss="modal">Sačuvaj</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', function () {
@@ -262,6 +324,100 @@
             const storyContainer = document.getElementById('storyContainer');
             const storyContent = document.getElementById('storyContent');
             const copyStoryBtn = document.getElementById('copyStory');
+
+            // Settings Elements
+            const apiKeyInput = document.getElementById('apiKey');
+            const geminiModelInput = document.getElementById('geminiModel');
+            const tempRange = document.getElementById('tempRange');
+            const tempValueDisplay = document.getElementById('tempValue');
+            const customPromptInput = document.getElementById('customPrompt');
+            const loadDefaultPromptBtn = document.getElementById('loadDefaultPrompt');
+            const saveSettingsBtn = document.getElementById('saveSettings');
+
+            // Update Temp Display
+            tempRange.addEventListener('input', () => {
+                tempValueDisplay.textContent = tempRange.value;
+            });
+
+            const defaultPrompt = `Napiši maštovitu i zanimljivu priču na bosanskom jeziku za dijete po imenu {child_name} na osnovu priloženog crteža: {image_description}.
+
+Priča treba biti u stilu {style} i sadržavati otprilike {length}.
+Pobrini se da priča bude primjerena uzrastu djeteta, zabavna i da uključuje elemente koji se mogu vidjeti na crtežu.
+Glavni lik priče treba biti {child_name} ili priča treba povezati crtež sa avanturom koju {child_name} doživljava.
+
+Započni priču sa: "Jednom davno, {child_name} je otkrio/la..."
+Za stil basne možeš započeti sa: "Priča se događa u jednom dalekom carstvu gdje živi..."
+Završi priču sa: "...i tako se završila izuzetna avantura koju je doživio/la {child_name}!"
+
+Učini priču kreativnom, pozitivnom i primjerenom za djecu. Sav tekst mora biti na bosanskom jeziku.`;
+
+            // Load Settings from Backend
+            async function loadSettings() {
+                try {
+                    const response = await fetch('/api/settings');
+                    const settings = await response.json();
+
+                    if (settings.api_key) {
+                        apiKeyInput.value = settings.api_key;
+                    }
+                    if (settings.gemini_model) {
+                        geminiModelInput.value = settings.gemini_model;
+                    } else {
+                        geminiModelInput.value = 'gemini-flash-latest';
+                    }
+                    if (settings.temperature !== undefined) {
+                        tempRange.value = settings.temperature;
+                        tempValueDisplay.textContent = settings.temperature;
+                    }
+                    if (settings.custom_prompt) {
+                        customPromptInput.value = settings.custom_prompt;
+                    } else {
+                        customPromptInput.value = defaultPrompt;
+                    }
+                } catch (error) {
+                    console.error('Greška prilikom učitavanja postavki:', error);
+                    customPromptInput.value = defaultPrompt;
+                }
+            }
+
+            loadSettings();
+
+            // Save Settings to Backend
+            saveSettingsBtn.addEventListener('click', async () => {
+                const settings = {
+                    api_key: apiKeyInput.value,
+                    gemini_model: geminiModelInput.value || 'gemini-flash-latest',
+                    temperature: parseFloat(tempRange.value),
+                    custom_prompt: customPromptInput.value
+                };
+
+                try {
+                    const response = await fetch('/api/settings', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(settings)
+                    });
+
+                    if (response.ok) {
+                        // Optional: Show success message or toast
+                        console.log('Postavke spremljene');
+                    } else {
+                        alert('Greška prilikom spremanja postavki.');
+                    }
+                } catch (error) {
+                    console.error('Greška prilikom spremanja postavki:', error);
+                    alert('Greška prilikom spremanja postavki.');
+                }
+            });
+
+            // Load Default Prompt
+            loadDefaultPromptBtn.addEventListener('click', () => {
+                if (confirm('Jeste li sigurni? Ovo će zamijeniti trenutni tekst prompta.')) {
+                    customPromptInput.value = defaultPrompt;
+                }
+            });
 
             // Selekcija stila
             const styleOptions = document.querySelectorAll('.style-option');
@@ -371,6 +527,14 @@
                     return;
                 }
 
+                // Check for API Key
+                if (!apiKeyInput.value) {
+                    alert('API ključ je obavezan! Molimo unesite ga u postavkama.');
+                    const settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'));
+                    settingsModal.show();
+                    return;
+                }
+
                 // Prikaži učitavanje
                 loading.style.display = 'block';
                 storyContainer.style.display = 'none';
@@ -379,7 +543,20 @@
                 formData.append('image', imageUpload.files[0]);
                 formData.append('child_name', document.getElementById('childName').value);
                 formData.append('style', selectedStyleInput.value);
+                formData.append('style', selectedStyleInput.value);
                 formData.append('length', selectedLengthInput.value);
+
+                // Add secure settings
+                if (apiKeyInput.value) {
+                    formData.append('api_key', apiKeyInput.value);
+                }
+                if (customPromptInput.value) {
+                    formData.append('custom_prompt', customPromptInput.value);
+                }
+                if (geminiModelInput.value) {
+                    formData.append('gemini_model', geminiModelInput.value);
+                }
+                formData.append('temperature', tempRange.value);
 
                 try {
                     const response = await fetch('/generate-story/', {
@@ -390,6 +567,18 @@
                     const data = await response.json();
 
                     if (response.ok) {
+                        let usageInfo = '';
+                        if (data.usage) {
+                            usageInfo = `
+                                <div class="alert alert-danger mt-4 p-2 small" style="border-left: 4px solid #dc3545;">
+                                    <div class="d-flex justify-content-around text-center text-danger">
+                                        <div><strong>Ulazni:</strong> ${data.usage.prompt_token_count}</div>
+                                        <div><strong>Izlazni:</strong> ${data.usage.candidates_token_count}</div>
+                                        <div><strong>Ukupno:</strong> ${data.usage.total_token_count}</div>
+                                    </div>
+                                </div>
+                            `;
+                        }
                         storyContent.innerHTML = `
                             <div class="text-center mb-4">
                                 <img src="data:${data.mime_type};base64,${data.image_base64}" class="img-fluid rounded shadow" style="max-height: 400px; width: auto;" alt="Vaš crtež">
@@ -397,6 +586,7 @@
                             <div class="story-text">
                                 <p>${data.story.replace(/\n/g, '<br>')}</p>
                             </div>
+                            ${usageInfo}
                         `;
                         storyContainer.style.display = 'block';
                     } else {

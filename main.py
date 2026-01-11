@@ -11,29 +11,65 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 import os
+import sys
 import io
 from typing import Optional
 
 from google import genai
 from PIL import Image
 import base64
+import json
+import webbrowser
+import threading
+import time
+from pydantic import BaseModel
 
 # Učitavanje varijabli okruženja iz .env datoteke
 from dotenv import load_dotenv
 load_dotenv()
 
 # Globalna inicijalizacija Gemini klijenta
-api_key = os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    # Upozorenje ako ključ nije postavljen, ali dozvoljavamo aplikaciji da se pokrene
-    print("WARNING: GEMINI_API_KEY nije postavljen u .env datoteci!")
-    client = None
-else:
-    client = genai.Client(api_key=api_key)
+# NAPOMENA: Klijent se sada inicijalizira po zahtjevu korisnika (BYOK)
+client = None
+
+# --- KONFIGURACIJA ---
+def get_exe_dir():
+    """Vraća direktorij gdje se nalazi izvršna datoteka (exe)."""
+    if hasattr(sys, 'frozen'):
+        return os.path.dirname(sys.executable)
+    return os.path.abspath(".")
+
+CONFIG_FILE = os.path.join(get_exe_dir(), "config.json")
+
+class Settings(BaseModel):
+    api_key: Optional[str] = None
+    custom_prompt: Optional[str] = None
+    gemini_model: str = "gemini-flash-latest"
+    temperature: float = 1.0
+
+def load_settings() -> Settings:
+    """Učitava postavke iz config.json datoteke."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return Settings(**data)
+        except Exception as e:
+            print(f"Greška prilikom učitavanja konfiguracije: {e}")
+    return Settings()
+
+def save_settings(settings: Settings):
+    """Sprema postavke u config.json datoteku."""
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            f.write(settings.model_dump_json())
+    except Exception as e:
+        print(f"Greška prilikom spremanja konfiguracije: {e}")
 
 
-def get_story_prompt(child_name: str, style: str, length: str, image_description: str) -> str:
-    """Construct the prompt for story generation."""
+
+def get_prompt_variables(child_name: str, style: str, length: str, image_description: str) -> dict:
+    """Prepare variables for the story prompt."""
     # Map English style names to Bosnian equivalents for use in the prompt
     style_mapping = {
         "fairy tale": "basna",
@@ -49,9 +85,16 @@ def get_story_prompt(child_name: str, style: str, length: str, image_description
     # Length description is already in Bosnian
     length_description = "5 paragrafa" if length == "short" else "10 paragrafa"
 
-    prompt = f"""Napiši maštovitu i zanimljivu priču na bosanskom jeziku za dijete po imenu {child_name} na osnovu priloženog crteža: {image_description}.
+    return {
+        "child_name": child_name,
+        "style": bosnian_style,
+        "length": length_description,
+        "image_description": image_description
+    }
 
-Priča treba biti u stilu {bosnian_style} i sadržavati otprilike {length_description}.
+DEFAULT_PROMPT_TEMPLATE = """Napiši maštovitu i zanimljivu priču na bosanskom jeziku za dijete po imenu {child_name} na osnovu priloženog crteža: {image_description}.
+
+Priča treba biti u stilu {style} i sadržavati otprilike {length}.
 Pobrini se da priča bude primjerena uzrastu djeteta, zabavna i da uključuje elemente koji se mogu vidjeti na crtežu.
 Glavni lik priče treba biti {child_name} ili priča treba povezati crtež sa avanturom koju {child_name} doživljava.
 
@@ -61,36 +104,76 @@ Završi priču sa: "...i tako se završila izuzetna avantura koju je doživio/la
 
 Učini priču kreativnom, pozitivnom i primjerenom za djecu. Sav tekst mora biti na bosanskom jeziku."""
 
-    return prompt
-
 
 app = FastAPI(title="API za Generator priča za djecu")
 
-# Kreiranje potrebnih direktorija
-Path("static").mkdir(parents=True, exist_ok=True)
-Path("templates").mkdir(parents=True, exist_ok=True)
+# --- KONFIGURACIJA PUTEVA ZA PYINSTALLER ---
+def get_resource_path(relative_path):
+    """Vraća apsolutni put do resursa, radi za razvoj i za PyInstaller."""
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
-# Povezivanje statičkih datoteka - OVO JE POTREBNO ZA SERVIRANJE ASSETA
-app.mount("/static", StaticFiles(directory="static"), name="static")
+static_dir = get_resource_path("static")
+templates_dir = get_resource_path("templates")
 
-# Postavljanje šablona (templates)
-templates = Jinja2Templates(directory="templates")
-
+# Provjera postojanja direktorija resursa
+if not os.path.exists(static_dir):
+    print(f"WARNING: Static direktorij nije pronađen na: {static_dir}")
+if not os.path.exists(templates_dir):
+    print(f"WARNING: Templates direktorij nije pronađen na: {templates_dir}")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     """Prikazuje glavnu stranicu web interfejsa."""
     return templates.TemplateResponse("index.html", {"request": request})
 
+# Povezivanje statičkih datoteka
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-async def generate_story_with_gemini_api(image_data: bytes, child_name: str, style: str, length: str) -> str:
-    """Generira priču koristeći Google Gemini API na osnovu podataka o slici iz memorije."""
+# Postavljanje šablona (templates)
+templates = Jinja2Templates(directory=templates_dir)
+
+
+async def generate_story_with_gemini_api(
+    image_data: bytes, 
+    child_name: str, 
+    style: str, 
+    length: str,
+    api_key: Optional[str] = None,
+    custom_prompt: Optional[str] = None,
+    gemini_model: str = "gemini-flash-latest",
+    temperature: float = 1.0
+) -> tuple[str, dict]:
+    """Generira priču koristeći Google Gemini API i vraća tekst i metapodatke o korištenju."""
     try:
-        if not client:
-            raise ValueError("Gemini API klijent nije inicijaliziran. Provjerite API ključ.")
+        # Determine which client to use
+        current_client = None
+        if api_key and api_key.strip():
+            current_client = genai.Client(api_key=api_key)
+        else:
+            current_client = client
 
-        # Kreiranje upita (prompta)
-        prompt = get_story_prompt(child_name, style, length, "priloženog crteža")
+        if not current_client:
+            raise ValueError("API ključ je obavezan. Molimo unesite svoj Google Gemini API ključ u postavkama.")
+
+        # Prepare variables
+        variables = get_prompt_variables(child_name, style, length, "priloženog crteža")
+
+        # Determine prompt
+        if custom_prompt and custom_prompt.strip():
+            try:
+                # Use safe formatting or just format. 
+                # Using standard format, but we should be careful if user puts extra braces.
+                # For simplicity, we assume user knows what they are doing with {keys}.
+                prompt = custom_prompt.format(**variables)
+            except KeyError as e:
+                # Fallback or error? Let's error clearly.
+                raise ValueError(f"Greška u formatu šablona: Nedostaje varijabla {e}")
+            except Exception as e:
+                raise ValueError(f"Greška prilikom formatiranja šablona: {e}")
+        else:
+            prompt = DEFAULT_PROMPT_TEMPLATE.format(**variables)
         
         # Učitavanje slike iz bajtova
         image_file = io.BytesIO(image_data)
@@ -101,12 +184,20 @@ async def generate_story_with_gemini_api(image_data: bytes, child_name: str, sty
         from fastapi.concurrency import run_in_threadpool
         
         response = await run_in_threadpool(
-            client.models.generate_content,
-            model='gemini-flash-latest',
-            contents=[prompt, img]
+            current_client.models.generate_content,
+            model=gemini_model,
+            contents=[prompt, img],
+            config={'temperature': temperature}
         )
         
-        return response.text
+        # Ekstrakcija metapodataka o tokenima
+        usage_metadata = {
+            "prompt_token_count": response.usage_metadata.prompt_token_count if response.usage_metadata else 0,
+            "candidates_token_count": response.usage_metadata.candidates_token_count if response.usage_metadata else 0,
+            "total_token_count": response.usage_metadata.total_token_count if response.usage_metadata else 0
+        }
+        
+        return response.text, usage_metadata
 
     except Exception as e:
         # Proslijeđuje izuzetak da se obradi na višem nivou
@@ -118,7 +209,11 @@ async def generate_story(
     image: UploadFile = File(...),
     child_name: str = Form(...),
     style: str = Form(...),
-    length: str = Form(...)
+    length: str = Form(...),
+    api_key: Optional[str] = Form(None),
+    custom_prompt: Optional[str] = Form(None),
+    gemini_model: Optional[str] = Form(None),
+    temperature: Optional[float] = Form(None)
 ):
     """Generira priču na osnovu otpremljene slike i korisničkih postavki."""
     # Validacija ulaznih podataka
@@ -155,7 +250,16 @@ async def generate_story(
         image_content = await image.read()
 
         # Generiranje priče pomoću API funkcije
-        story = await generate_story_with_gemini_api(image_content, child_name, style, length)
+        story, usage = await generate_story_with_gemini_api(
+            image_content, 
+            child_name, 
+            style, 
+            length, 
+            api_key=api_key, 
+            custom_prompt=custom_prompt,
+            gemini_model=gemini_model or "gemini-flash-latest",
+            temperature=temperature if temperature is not None else 1.0
+        )
 
         # Encode image to base64 for frontend display
         image_base64 = base64.b64encode(image_content).decode('utf-8')
@@ -163,7 +267,8 @@ async def generate_story(
         return {
             "story": story,
             "image_base64": image_base64,
-            "mime_type": mime_type
+            "mime_type": mime_type,
+            "usage": usage
         }
 
     except Exception as e:
@@ -175,7 +280,38 @@ async def health_check():
     """Endpoint za provjeru statusa aplikacije (health check)."""
     return {"status": "ok"}
 
+    return {"status": "ok"}
+
+
+@app.get("/api/settings", response_model=Settings)
+async def get_settings():
+    """Vraća trenutne postavke."""
+    return load_settings()
+
+
+@app.post("/api/settings")
+async def update_settings(settings: Settings):
+    """Ažurira postavke."""
+    save_settings(settings)
+    return {"status": "success", "message": "Postavke spremljene"}
+
+
+def open_browser():
+    """Otvara web pretraživač nakon kratkog čekanja."""
+    url = "http://localhost:8000"
+    time.sleep(1.5)  # Čekamo da se server pokrene
+    print(f"Otvaram pretraživač na: {url}")
+    print(f"Ako se pretraživač ne otvori automatski, posjetite: {url}")
+    try:
+        webbrowser.open(url)
+    except Exception as e:
+        print(f"Ne mogu automatski otvoriti pretraživač: {e}")
+
 
 if __name__ == "__main__":
     import uvicorn
+    
+    # Pokreni otvaranje pretraživača u zasebnoj dretvi
+    threading.Thread(target=open_browser, daemon=True).start()
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
