@@ -1,4 +1,6 @@
-# Generator priča za djecu
+# Gemini API Generator priča za djecu
+
+Alat je kreiran za potrebe mog kursa "Uvod u AI - Vještačku inteligenciju" u sklopu lekcije Vision Language modeli.
 
 ![Screenshot aplikacije](Screenshot1.png)
 
